@@ -9,7 +9,7 @@ from torch import nn
 from torch.optim import Adam
 from torch.distributions import Categorical
 from utils import *
-
+# torch.autograd.set_detect_anomaly(True)
 
 # Class for training an RL agent with Actor-Critic
 class ACTrainer:
@@ -173,6 +173,7 @@ class DQNTrainer:
     def __init__(self, params):
         self.params = params
         self.env = gym.make(self.params['env_name'])
+        print(self.env.observation_space.shape[0])
         self.q_net = QNet(input_size=self.env.observation_space.shape[0], output_size=self.env.action_space.n, hidden_dim=self.params['hidden_dim']).to(get_device())
         self.target_net = QNet(input_size=self.env.observation_space.shape[0], output_size=self.env.action_space.n, hidden_dim=self.params['hidden_dim']).to(get_device())
         self.target_net.load_state_dict(self.q_net.state_dict())
@@ -214,7 +215,12 @@ class DQNTrainer:
         # TODO: Implement the epsilon-greedy behavior
         # HINT: The agent will will choose action based on maximum Q-value with
         # '1-ε' probability, and a random action with 'ε' probability.
-        action = ???
+        if random.random() < self.epsilon:
+            action = self.env.action_space.sample()
+        else:
+            with torch.no_grad():
+                obs = torch.tensor(obs, dtype=torch.float32).to(get_device()).unsqueeze(0)
+                action = self.q_net(obs).max(1)[1].view(1, 1).item()
         return action
 
     def update_q_net(self):
@@ -223,14 +229,63 @@ class DQNTrainer:
         # TODO: Update Q-net
         # HINT: You should draw a batch of random samples from the replay buffer
         # and train your Q-net with that sampled batch.
+        transitions = self.replay_memory.sample(self.params['batch_size'])
+        # print(transitions)
+        batch = Transition(*zip(*transitions))
+        # print(batch)
+        non_final_mask = torch.tensor(tuple(map(lambda s: s is not None, batch.next_state)), device=get_device(), dtype=torch.bool)
+        # print(batch.next_state)
+        # print(non_final_mask)
+        non_final_next_states = torch.cat([torch.tensor(s, dtype=torch.float32).unsqueeze(0).to(get_device()) for s in batch.next_state
+                                                if s is not None])
+        # print(non_final_mask)
+        # next_state_batch = torch.FloatTensor([s if s is not None else np.zeros_like(batch.state[0]) for s in batch.next_state]).to(get_device())
+        state_batch = torch.FloatTensor(batch.state).to(get_device())
+        action_batch = torch.LongTensor(batch.action).unsqueeze(1).to(get_device())
+        # reward_batch = torch.FloatTensor(batch.reward).unsqueeze(1).to(get_device())
+        reward_batch = torch.cat([torch.tensor(s, dtype=torch.float32).unsqueeze(0).to(get_device()) for s in batch.reward])
 
-        predicted_state_value = ???
-        target_value = ???
+        # done_batch = torch.FloatTensor(batch.non_final).unsqueeze(1).to(get_device())
+        
+        # print(state_batch)
+        # print(action_batch)
+        # print(reward_batch)
+        # print(non_final_next_states)
+        # exit()
 
+        predicted_state_value = self.q_net(state_batch).gather(1, action_batch)
+
+        
+        next_state_values = torch.zeros(self.params['batch_size'], device=get_device())
+        # print(next_state_values.shape)
+        # print("H")
+        with torch.no_grad():
+            next_state_values[non_final_mask] = self.target_net(non_final_next_states).max(1)[0]
+        # print(next_state_values)
+        # next_state_values[done_batch.squeeze() == 0] = self.target_net(next_state_batch[done_batch.squeeze() == 0]).max(1)[0].detach()
+        # print(next_state_values)
+
+        # print(next_state_values)
+        # exit()
+        target_value = (next_state_values * 0.99) + reward_batch
+        # print("\n\n\n\n\n\n")
+        # print(target_value)
+        # print(predicted_state_value)
+        # exit()
+        # print(reward_batch.shape)
+        # print(next_state_values.shape)
         criterion = nn.SmoothL1Loss()
+        # print(predicted_state_value.shape)
+        # print(target_value.shape)
+        # print(predicted_state_value.size())
+        # print(target_value.size())
+        # print(target_value)
+        # exit()
         q_loss = criterion(predicted_state_value, target_value.unsqueeze(1))
         self.optimizer.zero_grad()
         q_loss.backward()
+        torch.nn.utils.clip_grad_value_(self.q_net.parameters(), 100)
+
         self.optimizer.step()
 
     def update_target_net(self):
@@ -258,13 +313,13 @@ class ReplayMemory:
     # TODO: Implement replay buffer
     # HINT: You can use python data structure deque to construct a replay buffer
     def __init__(self, capacity):
-        ???
+        self.buffer = deque([], maxlen=capacity)
 
     def push(self, *args):
-        ???
+        self.buffer.append(Transition(*args))
 
     def sample(self, n_samples):
-        ???
+        return random.sample(self.buffer, n_samples)
 
 
 class QNet(nn.Module):
@@ -275,9 +330,10 @@ class QNet(nn.Module):
         self.ff_net = nn.Sequential( #sequential operation
             nn.Linear(input_size,hidden_dim), 
             nn.ReLU(), 
-            nn.Linear(hidden_dim,output_size), 
-            nn.Softmax( dim=-1))
+            nn.Linear(hidden_dim,output_size))
 
     def forward(self, obs):
         return self.ff_net(obs)
 
+Transition = namedtuple('Transition',
+                        ('state', 'action', 'reward', 'next_state',  'non_final'))
