@@ -32,7 +32,11 @@ class ACTrainer:
             self.update_actor_net()
             # TODO: Calculate avg reward for this rollout
             # HINT: Add all the rewards from each trajectory. There should be "ntr" trajectories within a single rollout.
-            avg_ro_reward = ???
+            total_reward = 0
+            for t_idx in range(self.params['n_trajectory_per_rollout']):
+                for r_idx in range(len((self.trajectory['reward'])[t_idx])):
+                    total_reward += self.trajectory['reward'][t_idx][r_idx]
+            avg_ro_reward = total_reward/self.params['n_trajectory_per_rollout']
             print(f'End of rollout {ro_idx}: Average trajectory reward is {avg_ro_reward: 0.2f}')
             # Append average rollout reward into a list
             list_ro_reward.append(avg_ro_reward)
@@ -50,7 +54,7 @@ class ACTrainer:
             self.update_target_value()
             for critic_epoch_idx in range(self.params['n_critic_epoch']):
                 critic_loss = self.estimate_critic_loss_function()
-                critic_loss.backward()
+                critic_loss.backward(retain_graph=True)
                 self.critic_optimizer.step()
                 self.critic_optimizer.zero_grad()
 
@@ -58,14 +62,55 @@ class ACTrainer:
         # TODO: Update target values
         # HINT: Use definition of target-estimate from equation 7 of teh assignment PDF
 
-        self.trajectory['state_value'] = ???
-        self.trajectory['target_value'] = ???
+
+        rewards = self.trajectory['reward']
+        state_valueolde = self.trajectory['obs']
+        state_value = list()
+        for traj in state_valueolde:
+            state_value.append(traj.clone())
+        state_value = state_valueolde
+        next_state_value = list()
+
+        for i in range(len(state_value)):
+            traj = list()
+            for j in range(len(state_value[i])):
+                if j <= (len(state_value[i])-2):
+                    traj.append(self.critic_net(state_value[i][j+1]))
+                else:
+                    traj.append(0)
+            next_state_value.append(traj)
+        state_value_o = list()
+        for i in range(len(state_value)):
+            traj = list()
+            for j in range(len(state_value[i])):
+                traj.append(self.critic_net(state_value[i][j]))
+            state_value_o.append(traj)
+        target_value = list()
+        for i in range(len(next_state_value)):
+            traj = list()
+            for j in range(len(next_state_value[i])):
+                traj.append(rewards[i][j] + gamma*next_state_value[i][j])
+            target_value.append(traj)
+        # target_value = rewards + gamma * next_state_value
+
+
+        self.trajectory['state_value'] = state_value_o
+        self.trajectory['target_value'] = target_value
 
     def estimate_advantage(self, gamma=0.99):
         # TODO: Estimate advantage
         # HINT: Use definition of advantage-estimate from equation 6 of teh assignment PDF
 
-        self.trajectory['advantage'] = ???
+        # self.trajectory['advantage'] = ???
+        adv = list()
+        for t_idx in range(self.params['n_trajectory_per_rollout']):
+            traj = list()
+            for r_idx in range(len(self.trajectory['target_value'][t_idx])):
+                traj.append((self.trajectory['target_value'][t_idx][r_idx] - self.trajectory['state_value'][t_idx][r_idx]).detach().numpy())
+            adv.append(traj)
+        # critic_loss = self.trajectory['target_value'] - self.trajectory['state_value'] 
+        self.trajectory['advantage'] = adv
+        return
 
     def update_actor_net(self):
         actor_loss = self.estimate_actor_loss_function()
@@ -76,15 +121,28 @@ class ACTrainer:
     def estimate_critic_loss_function(self):
         # TODO: Compute critic loss function
         # HINT: Use definition of critic-loss from equation 7 of teh assignment PDF. It is the MSE between target-values and state-values.
-        critic_loss = ???
+        critic_loss = list()
+        for t_idx in range(self.params['n_trajectory_per_rollout']):
+            traj = 0
+            for r_idx in range(len(self.trajectory['target_value'][t_idx])):
+                traj +=((self.trajectory['target_value'][t_idx][r_idx] - self.trajectory['state_value'][t_idx][r_idx])**2)
+
+            critic_loss.append(traj/self.params['n_trajectory_per_rollout'])
+
+        critic_loss = torch.stack(critic_loss).mean()
+
+        # critic_loss = torch.nn.functional.mse_loss(self.trajectory['target_value'], self.trajectory['state_value'])
         return critic_loss
 
     def estimate_actor_loss_function(self):
         actor_loss = list()
         for t_idx in range(self.params['n_trajectory_per_rollout']):
             advantage = apply_discount(self.trajectory['advantage'][t_idx])
+            # actions = self.trajectory['action'][t_idx]
+            log_probs = self.trajectory['log_prob'][t_idx]
+            actor_loss.append(-(log_probs * advantage).mean())
             # TODO: Compute actor loss function
-        actor_loss = ???
+        actor_loss = torch.stack(actor_loss).sum()
         return actor_loss
 
     def generate_video(self, max_frame=1000):
@@ -104,13 +162,19 @@ class ActorNet(nn.Module):
         super(ActorNet, self).__init__()
         # TODO: Define the actor net
         # HINT: You can use nn.Sequential to set up a 2 layer feedforward neural network.
-        self.ff_net = ???
+        self.ff_net = nn.Sequential( #sequential operation
+            nn.Linear(input_size,hidden_dim), 
+            nn.ReLU(), 
+            nn.Linear(hidden_dim,output_size),
+            nn.Softmax( dim=-1))
 
     def forward(self, obs):
         # TODO: Forward pass of actor net
         # HINT: (use Categorical from torch.distributions to draw samples and log-prob from model output)
-        action_index = ???
-        log_prob = ???
+        probabilities = Categorical(self.ff_net(obs))
+        action_index = probabilities.sample()
+        log_prob = probabilities.log_prob(action_index)
+        action_index =  action_index.data.numpy().astype('int32')
         return action_index, log_prob
 
 
@@ -120,12 +184,16 @@ class CriticNet(nn.Module):
         super(CriticNet, self).__init__()
         # TODO: Define the critic net
         # HINT: You can use nn.Sequential to set up a 2 layer feedforward neural network.
-        self.ff_net = ???
+        self.ff_net = nn.Sequential( #sequential operation
+            nn.Linear(input_size,hidden_dim), 
+            nn.ReLU(), 
+            nn.Linear(hidden_dim,output_size))
+
 
     def forward(self, obs):
         # TODO: Forward pass of critic net
         # HINT: (get state value from the network using the current observation)
-        state_value = ???
+        state_value = self.ff_net(obs)
         return state_value
 
 
